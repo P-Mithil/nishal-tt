@@ -78,11 +78,14 @@ class ExcelLoader:
                     print(f"First few rows:")
                     print(df.head())
                     
-                    # Check for additional sheets in course_data.xlsx (e.g., "7th sem " sheet)
+                    # Check for additional sheets in course_data.xlsx (e.g., "7th sem ", "Elective Data", "Minor Data" sheets)
                     if filename == 'course_data.xlsx':
                         try:
                             xl_file = pd.ExcelFile(filepath)
+                            # Priority sheets to load (Elective Data and Minor Data)
+                            priority_sheets = ['Elective Data', 'Minor Data']
                             for sheet_name in xl_file.sheet_names:
+                                # Load all additional sheets
                                 if sheet_name.lower() not in ['course data', 'sheet1'] and sheet_name.strip():
                                     sheet_df = pd.read_excel(filepath, sheet_name=sheet_name)
                                     # Store with a key based on sheet name

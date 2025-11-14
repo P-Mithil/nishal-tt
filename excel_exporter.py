@@ -570,9 +570,22 @@ class ExcelExporter:
                     else:
                         print(f"    FAILED: {department}_{POST_MID}")
                 
+                # Add Electives and Minor sheets
+                try:
+                    self._add_electives_sheet(w, semester)
+                except Exception as e:
+                    print(f"WARNING: Could not add Electives sheet: {e}")
+                
+                try:
+                    self._add_minor_sheet(w, semester)
+                except Exception as e:
+                    print(f"WARNING: Could not add Minor sheet: {e}")
+                
                 print(f"\nSUCCESS: Created {filename}")
                 print(f"  - {department_count} department schedules")
                 print(f"  - Course summary sheet")
+                print(f"  - Electives sheet")
+                print(f"  - Minor sheet")
             
             return True
             
@@ -658,6 +671,314 @@ class ExcelExporter:
                 print(f"WARNING: Could not format Course_Summary: {e}")
         except Exception as e:
             print(f"FAILED: Could not add course summary: {e}")
+    
+    def _assign_room_by_capacity(self, students, semester_id, assigned_rooms=None):
+        """Assign a room based on student count and capacity.
+        Ensures different classrooms are assigned to avoid conflicts.
+        Returns room name or empty string if no suitable room found.
+        
+        Args:
+            students: Number of students
+            semester_id: Semester ID
+            assigned_rooms: Set of already assigned room names to avoid conflicts
+        """
+        if not self.schedule_gen or not self.schedule_gen.classrooms:
+            return ""
+        
+        try:
+            students = int(float(students)) if students else 0
+        except (ValueError, TypeError):
+            return ""
+        
+        if students <= 0:
+            return ""
+        
+        if assigned_rooms is None:
+            assigned_rooms = set()
+        
+        # Sort classrooms by capacity (smallest first that fits)
+        suitable_rooms = [(name, cap) for name, cap in self.schedule_gen.classrooms 
+                         if cap and cap >= students and name not in assigned_rooms]
+        
+        if not suitable_rooms:
+            # If no room fits, use largest available that hasn't been assigned
+            suitable_rooms = [(name, cap) for name, cap in self.schedule_gen.classrooms 
+                             if cap and name not in assigned_rooms]
+        
+        if suitable_rooms:
+            # Find smallest room that fits, or largest if none fit
+            suitable_rooms.sort(key=lambda x: x[1])
+            # Prefer non-lab rooms for electives/minors
+            non_lab_rooms = [(name, cap) for name, cap in suitable_rooms 
+                           if name not in [r[0] for r in self.schedule_gen.lab_rooms]]
+            if non_lab_rooms:
+                return non_lab_rooms[0][0]
+            return suitable_rooms[0][0]
+        
+        # If all rooms are assigned, try to find any available room (even if assigned to another course)
+        # This is a fallback - ideally all courses should get unique rooms
+        all_suitable_rooms = [(name, cap) for name, cap in self.schedule_gen.classrooms 
+                             if cap and cap >= students]
+        if not all_suitable_rooms:
+            all_suitable_rooms = [(name, cap) for name, cap in self.schedule_gen.classrooms 
+                                 if cap]
+        
+        if all_suitable_rooms:
+            all_suitable_rooms.sort(key=lambda x: x[1])
+            non_lab_rooms = [(name, cap) for name, cap in all_suitable_rooms 
+                           if name not in [r[0] for r in self.schedule_gen.lab_rooms]]
+            if non_lab_rooms:
+                return non_lab_rooms[0][0]
+            return all_suitable_rooms[0][0]
+        
+        return ""
+    
+    def _get_electives_data(self, semester):
+        """Get elective data for a specific semester from 'Elective Data' sheet.
+        Returns DataFrame with columns: Course Code, Course Name, Faculty, Semester, Students, Classroom"""
+        try:
+            # Try to find elective data sheet
+            elective_df = None
+            sheet_keys = [k for k in self.dfs.keys() if 'elective' in k.lower()]
+            
+            if not sheet_keys:
+                # Try loading from course_data.xlsx directly
+                try:
+                    from config import INPUT_DIR
+                    course_file = os.path.join(INPUT_DIR, 'course_data.xlsx')
+                    if os.path.exists(course_file):
+                        xl_file = pd.ExcelFile(course_file)
+                        for sheet_name in xl_file.sheet_names:
+                            if 'elective' in sheet_name.lower():
+                                elective_df = pd.read_excel(course_file, sheet_name=sheet_name)
+                                break
+                except Exception as e:
+                    pass
+            
+            if not sheet_keys and elective_df is None:
+                # Check if it's in the loaded data frames with different naming
+                for key in self.dfs.keys():
+                    if 'elective' in key.lower() or 'electives' in key.lower():
+                        elective_df = self.dfs[key]
+                        break
+            
+            if sheet_keys and elective_df is None:
+                elective_df = self.dfs[sheet_keys[0]]
+            
+            if elective_df is None or elective_df.empty:
+                return pd.DataFrame(columns=['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom'])
+            
+            # Normalize column names - handle uppercase and variations
+            elective_df = elective_df.copy()
+            column_map = {}
+            for col in elective_df.columns:
+                col_lower = str(col).strip().lower()
+                if any(x in col_lower for x in ['course code', 'code']) and 'name' not in col_lower:
+                    column_map[col] = 'Course Code'
+                elif any(x in col_lower for x in ['course name', 'coursename']) and 'code' not in col_lower:
+                    column_map[col] = 'Course Name'
+                elif any(x in col_lower for x in ['faculty', 'instructor', 'teacher']):
+                    column_map[col] = 'Faculty'
+                elif any(x in col_lower for x in ['semester', 'sem']):
+                    column_map[col] = 'Semester'
+                elif any(x in col_lower for x in ['student', 'registered', 'enrollment', 'enrol']):
+                    column_map[col] = 'Students'
+            
+            elective_df = elective_df.rename(columns=column_map)
+            
+            # Filter by semester
+            if 'Semester' in elective_df.columns:
+                elective_df['Semester'] = pd.to_numeric(elective_df['Semester'], errors='coerce')
+                elective_df = elective_df[elective_df['Semester'] == semester].copy()
+            
+            if elective_df.empty:
+                return pd.DataFrame(columns=['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom'])
+            
+            # Prepare output columns
+            output_cols = ['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students']
+            available_cols = [col for col in output_cols if col in elective_df.columns]
+            result_df = elective_df[available_cols].copy()
+            
+            # Add Classroom column and assign rooms - ensure each course gets a different room
+            assigned_rooms = set()
+            if 'Students' in result_df.columns:
+                def assign_unique_room(students_val):
+                    room = self._assign_room_by_capacity(students_val, semester, assigned_rooms)
+                    if room:
+                        assigned_rooms.add(room)
+                    return room
+                
+                result_df['Classroom'] = result_df['Students'].apply(assign_unique_room)
+            else:
+                result_df['Classroom'] = ""
+            
+            # Ensure all required columns exist
+            for col in ['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom']:
+                if col not in result_df.columns:
+                    result_df[col] = ""
+            
+            # Reorder columns
+            result_df = result_df[['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom']]
+            
+            return result_df
+            
+        except Exception as e:
+            print(f"ERROR: Could not load elective data: {e}")
+            import traceback
+            traceback.print_exc()
+            return pd.DataFrame(columns=['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom'])
+    
+    def _get_minor_data(self, semester):
+        """Get minor data for a specific semester from 'Minor Data' sheet.
+        Returns DataFrame with columns: Course Code, Course Name, Faculty, Semester, Students, Classroom"""
+        try:
+            # Try to find minor data sheet
+            minor_df = None
+            sheet_keys = [k for k in self.dfs.keys() if 'minor' in k.lower()]
+            
+            if not sheet_keys:
+                # Try loading from course_data.xlsx directly
+                try:
+                    from config import INPUT_DIR
+                    course_file = os.path.join(INPUT_DIR, 'course_data.xlsx')
+                    if os.path.exists(course_file):
+                        xl_file = pd.ExcelFile(course_file)
+                        for sheet_name in xl_file.sheet_names:
+                            if 'minor' in sheet_name.lower():
+                                minor_df = pd.read_excel(course_file, sheet_name=sheet_name)
+                                break
+                except Exception as e:
+                    pass
+            
+            if not sheet_keys and minor_df is None:
+                # Check if it's in the loaded data frames with different naming
+                for key in self.dfs.keys():
+                    if 'minor' in key.lower() or 'minors' in key.lower():
+                        minor_df = self.dfs[key]
+                        break
+            
+            if sheet_keys and minor_df is None:
+                minor_df = self.dfs[sheet_keys[0]]
+            
+            if minor_df is None or minor_df.empty:
+                return pd.DataFrame(columns=['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom'])
+            
+            # Normalize column names - handle uppercase and variations
+            # Minor data has different structure: 'MINOR COURSE ' instead of separate Code/Name
+            minor_df = minor_df.copy()
+            column_map = {}
+            for col in minor_df.columns:
+                col_lower = str(col).strip().lower()
+                # Handle "MINOR COURSE " - use as both Course Code and Course Name
+                if any(x in col_lower for x in ['minor course', 'course']) and 'semester' not in col_lower and 'student' not in col_lower:
+                    column_map[col] = 'Course Name'  # Use as course name, we'll extract code if needed
+                elif any(x in col_lower for x in ['faculty', 'instructor', 'teacher']):
+                    column_map[col] = 'Faculty'
+                elif any(x in col_lower for x in ['semester', 'sem']):
+                    column_map[col] = 'Semester'
+                elif any(x in col_lower for x in ['student', 'registered', 'enrollment', 'enrol']):
+                    column_map[col] = 'Students'
+            
+            minor_df = minor_df.rename(columns=column_map)
+            
+            # Filter by semester
+            if 'Semester' in minor_df.columns:
+                minor_df['Semester'] = pd.to_numeric(minor_df['Semester'], errors='coerce')
+                minor_df = minor_df[minor_df['Semester'] == semester].copy()
+            
+            if minor_df.empty:
+                return pd.DataFrame(columns=['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom'])
+            
+            # Prepare output columns
+            output_cols = ['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students']
+            available_cols = [col for col in output_cols if col in minor_df.columns]
+            result_df = minor_df[available_cols].copy()
+            
+            # For Minor data, if we have Course Name but not Course Code, use Course Name as Code
+            # (Minor courses often don't have separate codes)
+            if 'Course Name' in result_df.columns and 'Course Code' not in result_df.columns:
+                result_df['Course Code'] = result_df['Course Name'].apply(lambda x: str(x).strip().upper()[:8] if x and str(x).strip() != '' and str(x).lower() != 'nan' else "")
+            
+            # If Course Code exists but Course Name doesn't, use Code as Name
+            if 'Course Code' in result_df.columns and 'Course Name' not in result_df.columns:
+                result_df['Course Name'] = result_df['Course Code']
+            
+            # Add Classroom column and assign rooms - ensure each course gets a different room
+            assigned_rooms = set()
+            if 'Students' in result_df.columns:
+                def assign_unique_room(students_val):
+                    room = self._assign_room_by_capacity(students_val, semester, assigned_rooms)
+                    if room:
+                        assigned_rooms.add(room)
+                    return room
+                
+                result_df['Classroom'] = result_df['Students'].apply(assign_unique_room)
+            else:
+                result_df['Classroom'] = ""
+            
+            # Ensure all required columns exist
+            for col in ['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom']:
+                if col not in result_df.columns:
+                    result_df[col] = ""
+            
+            # Reorder columns
+            result_df = result_df[['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom']]
+            
+            return result_df
+            
+        except Exception as e:
+            print(f"ERROR: Could not load minor data: {e}")
+            import traceback
+            traceback.print_exc()
+            return pd.DataFrame(columns=['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom'])
+    
+    def _add_electives_sheet(self, writer, semester):
+        """Add Electives sheet to the workbook."""
+        try:
+            electives_df = self._get_electives_data(semester)
+            
+            if electives_df.empty:
+                # Create empty sheet with headers
+                electives_df = pd.DataFrame(columns=['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom'])
+                print(f"  No elective data found for semester {semester} - creating empty Electives sheet")
+            
+            # Write to Excel
+            electives_df.to_excel(writer, sheet_name='Electives', index=False)
+            
+            # Format the sheet
+            try:
+                ws = writer.sheets['Electives']
+                self._format_worksheet(ws, has_index=False, start_row=1)
+                print(f"  SUCCESS: Added Electives sheet ({len(electives_df)} courses)")
+            except Exception as e:
+                print(f"  WARNING: Could not format Electives sheet: {e}")
+                
+        except Exception as e:
+            print(f"  WARNING: Could not add Electives sheet: {e}")
+    
+    def _add_minor_sheet(self, writer, semester):
+        """Add Minor sheet to the workbook."""
+        try:
+            minor_df = self._get_minor_data(semester)
+            
+            if minor_df.empty:
+                # Create empty sheet with headers
+                minor_df = pd.DataFrame(columns=['Course Code', 'Course Name', 'Faculty', 'Semester', 'Students', 'Classroom'])
+                print(f"  No minor data found for semester {semester} - creating empty Minor sheet")
+            
+            # Write to Excel
+            minor_df.to_excel(writer, sheet_name='Minor', index=False)
+            
+            # Format the sheet
+            try:
+                ws = writer.sheets['Minor']
+                self._format_worksheet(ws, has_index=False, start_row=1)
+                print(f"  SUCCESS: Added Minor sheet ({len(minor_df)} courses)")
+            except Exception as e:
+                print(f"  WARNING: Could not format Minor sheet: {e}")
+                
+        except Exception as e:
+            print(f"  WARNING: Could not add Minor sheet: {e}")
     
     def export_semester7_timetable(self):
         """Export special unified timetable for 7th semester with baskets.
