@@ -15,7 +15,6 @@ DEPARTMENTS = ['CSE-A', 'CSE-B', 'DSAI', 'ECE']
 
 # Target semesters
 TARGET_SEMESTERS = [1, 3, 5]
-
 # Session types
 PRE_MID = 'Pre-Mid'
 POST_MID = 'Post-Mid'
@@ -37,7 +36,6 @@ TEACHING_SLOTS = [
     '15:00-15:30', '15:30-16:00',
     '16:00-16:30', '16:30-17:00',
     '17:00-17:30','17:30-18:00',
-    '18:00-18:30', '18:30-19:00', '19:00-19:30'
 ]
 
 # Lunch and Minor slot definitions
