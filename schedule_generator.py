@@ -72,6 +72,9 @@ class ScheduleGenerator:
         self.semester_minor_slots = {}
         # Store elective slots per semester, keyed by (semester_id, elective_code)
         self.semester_elective_slots = {}
+        # Store elective tutorial slots per semester, keyed by (semester_id, 'ALL_ELECTIVE_TUTORIALS') or (semester_id, elective_code, 'Tutorial')
+        # This ensures all departments get elective tutorials at the same time slots for both Pre-Mid and Post-Mid
+        self.semester_elective_tutorial_slots = {}
         # 240-seater combined-class capacity per semester: set of (day, slot)
         self.semester_combined_capacity = {}
         # Combined class assigned slots per course and component:
@@ -522,6 +525,126 @@ class ScheduleGenerator:
             print(f"      WARNING: {course_code} - Only scheduled {scheduled_count}/{elective_per_week} elective classes (attempts: {attempts})")
         return scheduled_slots
     
+    def _schedule_elective_tutorials(self, schedule, course_code, elective_tutorials_per_week, department, session, semester_id, avoid_days=None):
+        """Schedule elective tutorials at the same slot/day for all departments/sections in a semester.
+        ALL elective tutorials in a semester must use the same time slots across ALL departments (CSE-A, CSE-B, DSAI, ECE)
+        for both Pre-Mid and Post-Mid sessions.
+        Returns list of (day, slot) tuples."""
+        if elective_tutorials_per_week == 0:
+            return []
+        scheduled_slots = []
+        attempts = 0
+        max_attempts = 1000
+        semester_key = f"sem_{semester_id}"
+        avoid_days = set(avoid_days or [])
+        
+        # Use a common key for ALL elective tutorials in a semester to ensure same time slots
+        # This ensures CSE-A, CSE-B, DSAI, and ECE all have elective tutorials at the same time
+        # Works for both Pre-Mid and Post-Mid sessions
+        common_elective_tutorial_key = (semester_key, 'ALL_ELECTIVE_TUTORIALS')
+        elective_tutorial_key = (semester_key, course_code, 'Tutorial')
+        used_days = set()
+        regular_slots = [slot for slot in TEACHING_SLOTS if slot not in (MINOR_SLOTS + LUNCH_SLOTS)]
+        
+        # First, check if common elective tutorial slots have been assigned for this semester
+        # If yes, ALL elective tutorials must use those same slots (for both Pre-Mid and Post-Mid)
+        if common_elective_tutorial_key in self.semester_elective_tutorial_slots:
+            assigned = self.semester_elective_tutorial_slots[common_elective_tutorial_key]
+            print(f"      Using common elective tutorial slots for {course_code} (already assigned for semester {semester_id})")
+            for day, start in assigned:
+                slots = self._get_consecutive_slots(start, TUTORIAL_DURATION)
+                if day in avoid_days:
+                    continue
+                for slot in slots:
+                    self._mark_slots_busy_local(schedule, day, [slot], course_code, 'Tutorial')
+                    self._mark_slots_busy_global(day, [slot], department, session, semester_id)
+                    scheduled_slots.append((day, slot))
+            # Also store under course-specific key for backward compatibility
+            self.semester_elective_tutorial_slots[elective_tutorial_key] = assigned
+            return scheduled_slots
+        
+        # If no common slots assigned yet, check if this specific course has tutorial slots assigned
+        # (This handles legacy cases where course-specific slots were assigned first)
+        if elective_tutorial_key in self.semester_elective_tutorial_slots:
+            assigned = self.semester_elective_tutorial_slots[elective_tutorial_key]
+            # Promote to common slots so all future elective tutorials use the same slots
+            self.semester_elective_tutorial_slots[common_elective_tutorial_key] = assigned
+            print(f"      Using existing elective tutorial slots for {course_code} (promoted to common slots for semester {semester_id})")
+            for day, start in assigned:
+                slots = self._get_consecutive_slots(start, TUTORIAL_DURATION)
+                if day in avoid_days:
+                    continue
+                for slot in slots:
+                    self._mark_slots_busy_local(schedule, day, [slot], course_code, 'Tutorial')
+                    self._mark_slots_busy_global(day, [slot], department, session, semester_id)
+                    scheduled_slots.append((day, slot))
+            return scheduled_slots
+
+        # Get preferred start slots (ending at :30) and remaining slots
+        preferred_starts, remaining_starts = self._get_preferred_start_slots(TUTORIAL_DURATION, regular_slots)
+        
+        # Build list of all possible (day, start_slot) combinations, prioritizing preferred slots
+        preferred_combinations = []
+        remaining_combinations = []
+        for day in DAYS:
+            for start_slot in preferred_starts:
+                slots = self._get_consecutive_slots(start_slot, TUTORIAL_DURATION)
+                slots = [slot for slot in slots if slot in regular_slots]
+                if len(slots) == TUTORIAL_DURATION:
+                    preferred_combinations.append((day, start_slot, slots))
+            for start_slot in remaining_starts:
+                slots = self._get_consecutive_slots(start_slot, TUTORIAL_DURATION)
+                slots = [slot for slot in slots if slot in regular_slots]
+                if len(slots) == TUTORIAL_DURATION:
+                    remaining_combinations.append((day, start_slot, slots))
+        
+        # Shuffle both lists for randomness
+        random.shuffle(preferred_combinations)
+        random.shuffle(remaining_combinations)
+        
+        # Combine: preferred first, then remaining
+        all_combinations = preferred_combinations + remaining_combinations
+
+        assigned = []
+        scheduled = 0
+        while scheduled < elective_tutorials_per_week and attempts < max_attempts:
+            attempts += 1
+            available_combos = [combo for combo in all_combinations if combo[0] not in used_days and combo[0] not in avoid_days]
+            if not available_combos:
+                available_combos = all_combinations
+            if not available_combos:
+                break
+            
+            day, start_slot, slots = random.choice(available_combos) if available_combos else (None, None, None)
+            if day is None:
+                break
+            
+            if (self._is_time_slot_available_local(schedule, day, slots) and
+                self._is_time_slot_available_global(day, slots, department, session, semester_id)):
+                for slot in slots:
+                    self._mark_slots_busy_local(schedule, day, [slot], course_code, 'Tutorial')
+                    self._mark_slots_busy_global(day, [slot], department, session, semester_id)
+                    scheduled_slots.append((day, slot))
+                assigned.append((day, start_slot))
+                used_days.add(day)
+                avoid_days.add(day)
+                scheduled += 1
+                # Remove this combination from future consideration
+                all_combinations = [c for c in all_combinations if c != (day, start_slot, slots)]
+        
+        if assigned:
+            # Store under common key so ALL elective tutorials in this semester use the same slots
+            # This works across all departments and both Pre-Mid and Post-Mid sessions
+            self.semester_elective_tutorial_slots[common_elective_tutorial_key] = assigned
+            # Also store under course-specific key for backward compatibility
+            self.semester_elective_tutorial_slots[elective_tutorial_key] = assigned
+            print(f"      Assigned common elective tutorial slots for semester {semester_id}: {assigned}")
+        
+        scheduled_count = len(scheduled_slots) // TUTORIAL_DURATION
+        if scheduled_count < elective_tutorials_per_week:
+            print(f"      WARNING: {course_code} - Only scheduled {scheduled_count}/{elective_tutorials_per_week} elective tutorials (attempts: {attempts})")
+        return scheduled_slots
+    
     def _schedule_elective_classes_tracked(self, schedule, course_code, elective_per_week, department, session, semester_id):
         """Schedule elective classes and return tuple (used_days, actual_scheduled_count).
         Uses common elective slots for ALL departments in a semester.
@@ -856,8 +979,19 @@ class ScheduleGenerator:
         if tutorials_per_week > 0:
             tut_slots = []
             if tutorials_remaining > 0:
-                tut_slots = self._schedule_tutorials(schedule, course_code, tutorials_remaining, department, session, semester_id, avoid_days=avoid_days)
-            success_counts['tutorials'] = applied_tut_count + (len(tut_slots) // TUTORIAL_DURATION)
+                if elective_flag:
+                    print(f"      -> Scheduling ELECTIVE tutorials for {course_code}: {tutorials_per_week} per week")
+                    tut_slots = self._schedule_elective_tutorials(schedule, course_code, tutorials_remaining, department, session, semester_id, avoid_days=avoid_days)
+                    success_counts['tutorials'] = applied_tut_count + (len(tut_slots) // TUTORIAL_DURATION)
+                    if success_counts['tutorials'] > 0:
+                        print(f"      -> Successfully scheduled {success_counts['tutorials']} elective tutorial(s) for {course_code}")
+                    else:
+                        print(f"      -> WARNING: Failed to schedule elective tutorials for {course_code}")
+                else:
+                    tut_slots = self._schedule_tutorials(schedule, course_code, tutorials_remaining, department, session, semester_id, avoid_days=avoid_days)
+                    success_counts['tutorials'] = applied_tut_count + (len(tut_slots) // TUTORIAL_DURATION)
+            else:
+                success_counts['tutorials'] = applied_tut_count
             scheduled_slots.extend(applied_tut_slots + tut_slots)
 
         fully_scheduled = (
