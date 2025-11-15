@@ -251,6 +251,7 @@ class ExamScheduler:
     
     def schedule_exams(self, courses_df, num_days=7):
         """Schedule exams across specified number of days.
+        Ensures each day has exactly one exam from each department.
         Creates format with days as columns and all courses distributed.
         Returns two DataFrames: one for FN session, one for AN session."""
         if courses_df.empty:
@@ -260,12 +261,25 @@ class ExamScheduler:
         if 'Course Code' not in courses_df.columns:
             return pd.DataFrame(), pd.DataFrame()
         
-        course_list = courses_df['Course Code'].dropna().unique().tolist()
-        random.shuffle(course_list)  # Randomize for distribution
+        # Group courses by department
+        courses_by_dept = {}
+        if 'Department' in courses_df.columns:
+            for _, row in courses_df.iterrows():
+                course_code = str(row.get('Course Code', '')).strip()
+                dept = str(row.get('Department', '')).strip()
+                if course_code and dept:
+                    if dept not in courses_by_dept:
+                        courses_by_dept[dept] = []
+                    if course_code not in courses_by_dept[dept]:
+                        courses_by_dept[dept].append(course_code)
+        else:
+            # If no department column, treat all as one group
+            all_courses = courses_df['Course Code'].dropna().unique().tolist()
+            courses_by_dept['ALL'] = [str(c).strip() for c in all_courses if str(c).strip()]
         
-        total_courses = len(course_list)
-        if total_courses == 0:
-            return pd.DataFrame(), pd.DataFrame()
+        # Shuffle courses within each department for random distribution
+        for dept in courses_by_dept:
+            random.shuffle(courses_by_dept[dept])
         
         # Use 7 days: Saturday, Monday, Tuesday, Wednesday, Thursday, Friday, Monday
         exam_days = ['Saturday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Monday']
@@ -276,40 +290,64 @@ class ExamScheduler:
         fn_schedule = {day: [] for day in exam_days}
         an_schedule = {day: [] for day in exam_days}
         
-        # Distribute all courses across days and sessions
-        # Calculate courses per day (divide total courses across all days)
-        courses_per_day_base = total_courses // len(exam_days)
-        extra_courses = total_courses % len(exam_days)
+        # Track which course index we're at for each department
+        dept_indices = {dept: 0 for dept in courses_by_dept}
         
-        course_idx = 0
-        
+        # Schedule exams ensuring one course per department per day
         for day_idx, day in enumerate(exam_days):
-            # Calculate courses for this day
-            courses_this_day = courses_per_day_base
-            # Distribute extra courses to first few days
-            if day_idx < extra_courses:
-                courses_this_day += 1
+            # For each day, assign one course from each department
+            # Balance between FN and AN sessions
+            dept_list = list(courses_by_dept.keys())
+            random.shuffle(dept_list)  # Randomize department order
             
-            # Ensure at least 1 course per day if we have courses remaining
-            if course_idx < total_courses and courses_this_day == 0:
-                courses_this_day = 1
+            # Split departments between FN and AN (roughly half each)
+            num_depts = len(dept_list)
+            fn_depts = dept_list[:num_depts // 2] if num_depts > 1 else dept_list
+            an_depts = dept_list[num_depts // 2:] if num_depts > 1 else []
             
-            # Distribute courses between FN and AN sessions
-            # Split roughly evenly: slightly more in FN if odd number
-            fn_count = (courses_this_day + 1) // 2  # Round up
-            an_count = courses_this_day - fn_count
+            # Assign to FN session
+            for dept in fn_depts:
+                if dept_indices[dept] >= len(courses_by_dept[dept]):
+                    continue  # No more courses for this department
+                
+                course = courses_by_dept[dept][dept_indices[dept]]
+                dept_indices[dept] += 1
+                fn_schedule[day].append(course)
             
-            # Assign courses to FN session
-            for i in range(fn_count):
-                if course_idx < total_courses:
-                    fn_schedule[day].append(course_list[course_idx])
-                    course_idx += 1
+            # Assign to AN session
+            for dept in an_depts:
+                if dept_indices[dept] >= len(courses_by_dept[dept]):
+                    continue  # No more courses for this department
+                
+                course = courses_by_dept[dept][dept_indices[dept]]
+                dept_indices[dept] += 1
+                an_schedule[day].append(course)
+        
+        # After ensuring one per department per day, distribute remaining courses
+        # Calculate remaining courses per department
+        remaining_by_dept = {}
+        for dept in courses_by_dept:
+            remaining = len(courses_by_dept[dept]) - dept_indices[dept]
+            if remaining > 0:
+                remaining_by_dept[dept] = courses_by_dept[dept][dept_indices[dept]:]
+        
+        # Distribute remaining courses across days and sessions
+        if remaining_by_dept:
+            all_remaining = []
+            for dept, courses in remaining_by_dept.items():
+                for course in courses:
+                    all_remaining.append((dept, course))
             
-            # Assign courses to AN session
-            for i in range(an_count):
-                if course_idx < total_courses:
-                    an_schedule[day].append(course_list[course_idx])
-                    course_idx += 1
+            random.shuffle(all_remaining)
+            
+            # Distribute remaining courses evenly
+            for idx, (dept, course) in enumerate(all_remaining):
+                day = exam_days[idx % len(exam_days)]
+                # Alternate between FN and AN
+                if idx % 2 == 0:
+                    fn_schedule[day].append(course)
+                else:
+                    an_schedule[day].append(course)
         
         # Create DataFrames with days as columns
         # FN Session DataFrame

@@ -10,6 +10,7 @@ from excel_loader import ExcelLoader
 from schedule_generator import ScheduleGenerator
 from excel_exporter import ExcelExporter
 from exam_scheduler import ExamScheduler
+from seating_arrangement import SeatingArrangementGenerator
 from config import TARGET_SEMESTERS, REQUIRED_FILES, DEPARTMENTS
 
 class TimetableGenerator:
@@ -171,6 +172,22 @@ def main():
                 print("\nNo room allocation conflicts detected.")
         except Exception as _e:
             print("\nRoom conflict validation could not be completed.")
+        
+        # Generate seating arrangements
+        try:
+            print("\n" + "="*80)
+            print("GENERATING SEATING ARRANGEMENTS")
+            print("="*80)
+            seating_gen = SeatingArrangementGenerator(generator.data_frames, generator.schedule_generator)
+            if seating_gen.generate_seating_arrangements():
+                print("SUCCESS: Seating arrangements generated")
+            else:
+                print("FAILED: Seating arrangement generation failed")
+        except Exception as e:
+            print(f"ERROR generating seating arrangements: {e}")
+            import traceback
+            traceback.print_exc()
+        
         return True
 
     except Exception as e:

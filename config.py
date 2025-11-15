@@ -4,14 +4,32 @@ import os
 # Get the directory where this config file is located
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Directory paths (relative to the script location)
-INPUT_DIR = os.path.join(BASE_DIR, 'sdtt_inputs')
-OUTPUT_DIR = os.path.join(BASE_DIR, 'output')
 
-# Required Excel input files
+INPUT_DIR_PATH = "D:/nishaltt/sdtt_inputs" 
+OUTPUT_DIR_PATH ="D:/nishaltt/output" 
+
+# Use direct path if provided, otherwise use relative path
+if INPUT_DIR_PATH:
+    INPUT_DIR = INPUT_DIR_PATH
+else:
+    INPUT_DIR = os.path.join(BASE_DIR, 'sdtt_inputs')
+
+if OUTPUT_DIR_PATH:
+    OUTPUT_DIR = OUTPUT_DIR_PATH
+else:
+    OUTPUT_DIR = os.path.join(BASE_DIR, 'output')
+
+# Required Excel input files (essential for timetable generation)
 REQUIRED_FILES = [
     'course_data.xlsx',
     'classroom_data.xlsx'
+]
+
+# Optional Excel input files (used for additional features)
+OPTIONAL_FILES = [
+    'faculty_availability.xlsx',  # Used for invigilation assignments
+    'student_data.xlsx',          # Used for enrollment/student information
+    'exam_data.xlsx'              # Used for exam-specific data
 ]
 
 # Departments

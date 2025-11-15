@@ -2,7 +2,7 @@
 import pandas as pd
 import os
 import re
-from config import INPUT_DIR, REQUIRED_FILES, DEPARTMENTS, MINOR_SUBJECT
+from config import INPUT_DIR, REQUIRED_FILES, OPTIONAL_FILES, DEPARTMENTS, MINOR_SUBJECT
 
 class ExcelLoader:
     """Handles loading of Excel files for all data inputs."""
@@ -123,9 +123,8 @@ class ExcelLoader:
                 print(f"Error details: {e}")
                 return None
         
-        # Load additional optional files (faculty_availability.xlsx)
-        optional_files = ['faculty_availability.xlsx']
-        for filename in optional_files:
+        # Load additional optional files
+        for filename in OPTIONAL_FILES:
             filepath = os.path.join(INPUT_DIR, filename)
             try:
                 if os.path.exists(filepath):
