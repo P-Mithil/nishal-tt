@@ -883,10 +883,20 @@ class ScheduleGenerator:
         # Determine if HSS
         is_hss = ('HSS' in course_code_str) or ('HSS' in course_name_str)
         
+        # Read Combined Class column (handle multiple column name variants)
+        combined_class_flag = False
+        for colname in ['Combined Class', 'COMBINED CLASS', 'Combined Class ', 'COMBINED CLASS ']:
+            if colname in course.index:
+                combined_class_val = str(course.get(colname, '')).strip().upper()
+                combined_class_flag = combined_class_val == 'YES'
+                if combined_class_flag:
+                    break
+        
         # IMPORTANT: Follow LTPSC strictly for ALL courses (including electives)
         # Do not override parsed weekly counts; use values from Excel (via parse_ltpsc)
         elective_status = " [ELECTIVE]" if elective_flag else ""
-        print(f"      Scheduling {course_code}{elective_status}: L={lectures_per_week}, T={tutorials_per_week}, P={labs_per_week}")
+        combined_status = " [COMBINED]" if combined_class_flag else ""
+        print(f"      Scheduling {course_code}{elective_status}{combined_status}: L={lectures_per_week}, T={tutorials_per_week}, P={labs_per_week}")
         skip_room_allocation = elective_flag or is_hss
         
         # Track used days for this course scoped to semester+department+session
@@ -910,14 +920,25 @@ class ScheduleGenerator:
             if required_count == 0:
                 return 0, []
             course_key = str(course_code).strip()
-            # Prefer global combined slots (shared across semesters), else semester-specific
-            global_key = ('GLOBAL', group_key, course_key, component_name) if group_key else None
-            sem_key = (semester_id, course_key, component_name)
+            # For combined classes, check if slots already exist for the paired department group
+            # This ensures CSE-A and CSE-B share slots, and DSAI and ECE share slots
             assigned = []
-            if global_key is not None:
+            if group_key:
+                # First check global combined slots (shared across semesters and departments in group)
+                global_key = ('GLOBAL', group_key, course_key, component_name)
                 assigned = self.global_combined_course_slots.get(global_key, [])
-            if not assigned:
+                
+                # If not found globally, check semester-specific combined slots
+                # Check for any department in the same group that might have scheduled this
+                if not assigned:
+                    # Check semester-specific slots (they're stored per course, not per department)
+                    sem_key = (semester_id, course_key, component_name)
+                    assigned = self.semester_combined_course_slots.get(sem_key, [])
+            else:
+                # No group key, check semester-specific only
+                sem_key = (semester_id, course_key, component_name)
                 assigned = self.semester_combined_course_slots.get(sem_key, [])
+            
             applied = 0
             applied_slots = []
             for day, start_slot in assigned:
@@ -944,55 +965,100 @@ class ScheduleGenerator:
         lectures_remaining = max(0, (lectures_per_week or 0) - applied_lec_count)
         tutorials_remaining = max(0, (tutorials_per_week or 0) - applied_tut_count)
 
-        # Schedule components in priority order (labs first, then lectures, then tutorials), for remaining
-        # Avoid scheduling multiple events of same course on the same day
-        avoid_days = set(self.scheduled_courses.get(scoped_key, set()))
+        # Initialize slot variables for both combined and regular scheduling
+        lec_slots = []
+        tut_slots = []
+        lab_slots = []
 
-        if labs_per_week > 0:
-            lab_slots = []
-            if labs_remaining > 0:
-                lab_slots = self._schedule_labs(schedule, course_code, labs_remaining, department, session, semester_id, avoid_days=avoid_days)
-            success_counts['labs'] = applied_lab_count + (len(lab_slots) // LAB_DURATION)
-            scheduled_slots.extend(applied_lab_slots + lab_slots)
+        # If this is a combined class, use combined scheduling logic
+        if combined_class_flag and group_key:
+            print(f"      -> Scheduling COMBINED CLASS for {course_code} (group: {group_key})")
+            # Use combined class scheduling which ensures same slots for paired departments
+            combined_lec, combined_tut, combined_lab, combined_slot_list = self._assign_combined_slots(
+                course_code, semester_id, lectures_remaining, tutorials_remaining, labs_remaining, group_key
+            )
+            
+            # Apply the combined slots to the schedule and extract meetings for room assignment
+            combined_lec_meetings = []
+            combined_tut_meetings = []
+            combined_lab_meetings = []
+            
+            for comp_name, day, start_slot in combined_slot_list:
+                duration = LECTURE_DURATION if comp_name == 'Lecture' else (TUTORIAL_DURATION if comp_name == 'Tutorial' else LAB_DURATION)
+                slots = self._get_consecutive_slots(start_slot, duration)
+                component_label = comp_name
+                self._mark_slots_busy_local(schedule, day, slots, course_code, component_label)
+                self._mark_slots_busy_global(day, slots, department, session, semester_id)
+                scheduled_slots.extend([(day, s) for s in slots])
+                
+                # Collect meetings for room assignment
+                for slot in slots:
+                    if comp_name == 'Lecture':
+                        combined_lec_meetings.append((day, slot))
+                    elif comp_name == 'Tutorial':
+                        combined_tut_meetings.append((day, slot))
+                    elif comp_name == 'Lab':
+                        combined_lab_meetings.append((day, slot))
+            
+            success_counts['lectures'] = applied_lec_count + combined_lec
+            success_counts['tutorials'] = applied_tut_count + combined_tut
+            success_counts['labs'] = applied_lab_count + combined_lab
+            
+            # Store combined meetings for room assignment
+            lec_slots = combined_lec_meetings
+            tut_slots = combined_tut_meetings
+            lab_slots = combined_lab_meetings
+        else:
+            # Regular scheduling (non-combined classes)
+            # Schedule components in priority order (labs first, then lectures, then tutorials), for remaining
+            # Avoid scheduling multiple events of same course on the same day
+            avoid_days = set(self.scheduled_courses.get(scoped_key, set()))
 
-        if lectures_per_week > 0:
-            if elective_flag:
-                print(f"      -> Scheduling ELECTIVE lectures for {course_code}: {lectures_per_week} per week")
-                lec_slots = []
-                if lectures_remaining > 0:
-                    lec_slots = self._schedule_elective_classes(schedule, course_code, lectures_remaining, department, session, semester_id, avoid_days=avoid_days)
-                success_counts['lectures'] = applied_lec_count + (len(lec_slots) // LECTURE_DURATION)
-                if success_counts['lectures'] > 0:
-                    print(f"      -> Successfully scheduled {success_counts['lectures']} elective lecture(s) for {course_code}")
-                else:
-                    print(f"      -> WARNING: Failed to schedule elective lectures for {course_code}")
-            else:
-                lec_slots = []
-                if lectures_remaining > 0:
-                    lec_slots = self._schedule_lectures(schedule, course_code, lectures_remaining, department, session, semester_id, avoid_days=avoid_days)
-                success_counts['lectures'] = applied_lec_count + (len(lec_slots) // LECTURE_DURATION)
-            scheduled_slots.extend(applied_lec_slots + lec_slots)
-        elif elective_flag and lectures_per_week == 0:
-            # Log elective even if it has no lectures (might have labs or tutorials)
-            print(f"      -> NOTE: Elective {course_code} has 0 lectures (may have labs/tutorials only)")
+            if labs_per_week > 0:
+                lab_slots = []
+                if labs_remaining > 0:
+                    lab_slots = self._schedule_labs(schedule, course_code, labs_remaining, department, session, semester_id, avoid_days=avoid_days)
+                success_counts['labs'] = applied_lab_count + (len(lab_slots) // LAB_DURATION)
+                scheduled_slots.extend(applied_lab_slots + lab_slots)
 
-        if tutorials_per_week > 0:
-            tut_slots = []
-            if tutorials_remaining > 0:
+            if lectures_per_week > 0:
                 if elective_flag:
-                    print(f"      -> Scheduling ELECTIVE tutorials for {course_code}: {tutorials_per_week} per week")
-                    tut_slots = self._schedule_elective_tutorials(schedule, course_code, tutorials_remaining, department, session, semester_id, avoid_days=avoid_days)
-                    success_counts['tutorials'] = applied_tut_count + (len(tut_slots) // TUTORIAL_DURATION)
-                    if success_counts['tutorials'] > 0:
-                        print(f"      -> Successfully scheduled {success_counts['tutorials']} elective tutorial(s) for {course_code}")
+                    print(f"      -> Scheduling ELECTIVE lectures for {course_code}: {lectures_per_week} per week")
+                    lec_slots = []
+                    if lectures_remaining > 0:
+                        lec_slots = self._schedule_elective_classes(schedule, course_code, lectures_remaining, department, session, semester_id, avoid_days=avoid_days)
+                    success_counts['lectures'] = applied_lec_count + (len(lec_slots) // LECTURE_DURATION)
+                    if success_counts['lectures'] > 0:
+                        print(f"      -> Successfully scheduled {success_counts['lectures']} elective lecture(s) for {course_code}")
                     else:
-                        print(f"      -> WARNING: Failed to schedule elective tutorials for {course_code}")
+                        print(f"      -> WARNING: Failed to schedule elective lectures for {course_code}")
                 else:
-                    tut_slots = self._schedule_tutorials(schedule, course_code, tutorials_remaining, department, session, semester_id, avoid_days=avoid_days)
-                    success_counts['tutorials'] = applied_tut_count + (len(tut_slots) // TUTORIAL_DURATION)
-            else:
-                success_counts['tutorials'] = applied_tut_count
-            scheduled_slots.extend(applied_tut_slots + tut_slots)
+                    lec_slots = []
+                    if lectures_remaining > 0:
+                        lec_slots = self._schedule_lectures(schedule, course_code, lectures_remaining, department, session, semester_id, avoid_days=avoid_days)
+                    success_counts['lectures'] = applied_lec_count + (len(lec_slots) // LECTURE_DURATION)
+                scheduled_slots.extend(applied_lec_slots + lec_slots)
+            elif elective_flag and lectures_per_week == 0:
+                # Log elective even if it has no lectures (might have labs or tutorials)
+                print(f"      -> NOTE: Elective {course_code} has 0 lectures (may have labs/tutorials only)")
+
+            if tutorials_per_week > 0:
+                tut_slots = []
+                if tutorials_remaining > 0:
+                    if elective_flag:
+                        print(f"      -> Scheduling ELECTIVE tutorials for {course_code}: {tutorials_per_week} per week")
+                        tut_slots = self._schedule_elective_tutorials(schedule, course_code, tutorials_remaining, department, session, semester_id, avoid_days=avoid_days)
+                        success_counts['tutorials'] = applied_tut_count + (len(tut_slots) // TUTORIAL_DURATION)
+                        if success_counts['tutorials'] > 0:
+                            print(f"      -> Successfully scheduled {success_counts['tutorials']} elective tutorial(s) for {course_code}")
+                        else:
+                            print(f"      -> WARNING: Failed to schedule elective tutorials for {course_code}")
+                    else:
+                        tut_slots = self._schedule_tutorials(schedule, course_code, tutorials_remaining, department, session, semester_id, avoid_days=avoid_days)
+                        success_counts['tutorials'] = applied_tut_count + (len(tut_slots) // TUTORIAL_DURATION)
+                else:
+                    success_counts['tutorials'] = applied_tut_count
+                scheduled_slots.extend(applied_tut_slots + tut_slots)
 
         fully_scheduled = (
             success_counts['lectures'] == lectures_per_week and
@@ -1015,6 +1081,7 @@ class ScheduleGenerator:
             self.scheduled_courses[scoped_key].add(day)
         # Assign rooms: labs in lab rooms; lectures/tutorials in non-lab rooms
         # Extract component meetings from local variables if present
+        # Combine applied slots (from existing combined) with newly scheduled slots
         lec_meetings = []
         tut_meetings = []
         lab_meetings = []
@@ -1033,32 +1100,77 @@ class ScheduleGenerator:
         course_code_str = str(course_code).strip()
         alloc_key = (semester_id, department, session, course_code_str)
 
-        # Allocate lab rooms first
-        if lab_meetings:
-            if skip_room_allocation:
-                if hasattr(self, 'assigned_lab_rooms') and alloc_key in self.assigned_lab_rooms:
-                    self.assigned_lab_rooms.pop(alloc_key, None)
-            else:
-                self._allocate_lab_room_for_course(semester_id, department, session, course_code, lab_meetings)
-        # Allocate lecture/tutorial rooms (can be shared)
-        lt_meetings = []
-        if lec_meetings:
-            lt_meetings.extend(lec_meetings)
-        if tut_meetings:
-            lt_meetings.extend(tut_meetings)
-        if lt_meetings:
-            if skip_room_allocation:
-                if hasattr(self, 'assigned_rooms') and alloc_key in self.assigned_rooms:
-                    self.assigned_rooms.pop(alloc_key, None)
-            else:
-                self._allocate_room_for_course(semester_id, department, session, course_code, lt_meetings)
+        # For combined classes, assign C004 (auditorium) room
+        if combined_class_flag:
+            # Combined classes always use C004 auditorium
+            c004_room = 'C004'
+            # Check if C004 exists in classrooms, if not add it
+            room_exists = any(room[0] == c004_room for room in self.classrooms)
+            if not room_exists:
+                # Add C004 as a large auditorium room
+                self.classrooms.append((c004_room, 240))  # 240-seater auditorium
+                self.nonlab_rooms.append((c004_room, 240))
+                self.classrooms.sort(key=lambda x: (x[1], x[0]))
+                self.nonlab_rooms.sort(key=lambda x: (x[1], x[0]))
+            
+            # Assign C004 to all combined class meetings
+            all_combined_meetings = []
+            if lec_meetings:
+                all_combined_meetings.extend(lec_meetings)
+            if tut_meetings:
+                all_combined_meetings.extend(tut_meetings)
+            if lab_meetings:
+                all_combined_meetings.extend(lab_meetings)
+            
+            # Always assign C004 room for combined classes, even if no meetings (shouldn't happen but ensure room is set)
+            if not hasattr(self, 'assigned_rooms'):
+                self.assigned_rooms = {}
+            if not hasattr(self, 'assigned_lab_rooms'):
+                self.assigned_lab_rooms = {}
+            self.assigned_rooms[alloc_key] = c004_room
+            if lab_meetings:
+                self.assigned_lab_rooms[alloc_key] = c004_room
+            
+            # Record room occupancy for all meetings
+            if all_combined_meetings:
+                semester_key = f"sem_{semester_id}"
+                for day, slot in all_combined_meetings:
+                    occ_key = (semester_key, day, slot)
+                    self.room_occupancy.setdefault(occ_key, set()).add(c004_room)
+                    self.room_bookings.setdefault(occ_key, []).append(
+                        (c004_room, department, str(course_code).strip(), session)
+                    )
+            
+            print(f"      -> Assigned C004 (auditorium) for combined class {course_code}")
+        else:
+            # Regular room allocation for non-combined classes
+            # Allocate lab rooms first
+            if lab_meetings:
+                if skip_room_allocation:
+                    if hasattr(self, 'assigned_lab_rooms') and alloc_key in self.assigned_lab_rooms:
+                        self.assigned_lab_rooms.pop(alloc_key, None)
+                else:
+                    self._allocate_lab_room_for_course(semester_id, department, session, course_code, lab_meetings)
+            # Allocate lecture/tutorial rooms (can be shared)
+            lt_meetings = []
+            if lec_meetings:
+                lt_meetings.extend(lec_meetings)
+            if tut_meetings:
+                lt_meetings.extend(tut_meetings)
+            if lt_meetings:
+                if skip_room_allocation:
+                    if hasattr(self, 'assigned_rooms') and alloc_key in self.assigned_rooms:
+                        self.assigned_rooms.pop(alloc_key, None)
+                else:
+                    self._allocate_room_for_course(semester_id, department, session, course_code, lt_meetings)
         # Store actual allocated counts now that we are final on success_counts
         self.actual_allocations[alloc_key] = {
             'lectures': success_counts['lectures'],
             'tutorials': success_counts['tutorials'],
             'labs': success_counts['labs'],
             'room': self.assigned_rooms.get(alloc_key, ''),
-            'lab_room': getattr(self, 'assigned_lab_rooms', {}).get(alloc_key, '')
+            'lab_room': getattr(self, 'assigned_lab_rooms', {}).get(alloc_key, ''),
+            'combined_class': combined_class_flag
         }
         # Report issues
         if not fully_scheduled:
@@ -1298,7 +1410,7 @@ class ScheduleGenerator:
     def get_actual_allocations(self, semester_id, department, session_type, course_code):
         """Get actual allocated counts for a specific course."""
         alloc_key = (semester_id, department, session_type, course_code)
-        return self.actual_allocations.get(alloc_key, {'lectures': 0, 'tutorials': 0, 'labs': 0, 'room': '', 'lab_room': ''})
+        return self.actual_allocations.get(alloc_key, {'lectures': 0, 'tutorials': 0, 'labs': 0, 'room': '', 'lab_room': '', 'combined_class': False})
 
     def _get_course_enrollment(self, semester_id, department, course_code):
         """Registered students for this course in this department/semester."""

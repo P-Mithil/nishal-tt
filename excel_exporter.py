@@ -346,8 +346,8 @@ class ExcelExporter:
                         actual_tutorials = actual.get('tutorials', 0)
                         actual_labs = actual.get('labs', 0)
                         
-                        # Combined classes disabled; always NO
-                        combined_used = False
+                        # Get combined class flag from actual allocations (read from input Excel file)
+                        combined_used = actual.get('combined_class', False)
                         # Room from schedule_gen allocations
                         room_alloc = actual.get('room', '')
                         lab_room_alloc = actual.get('lab_room', '')

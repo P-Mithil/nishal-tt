@@ -177,7 +177,7 @@ def main():
         print(f"ERROR: {e}")
         print("\nPlease check:")
         print("1. The course_data.xlsx file exists in the input folder")
-        print("2. The Excel file has the correct columns: Course Code, Course Name, Semester, LTPSC, Credits")
+        print("2. The Excel file has the correct columns: Course Code, Course Name, Semester, LTPSC, Credits, Combined Class")
         print("3. The Semester values are numeric (1, 3, 5)")
         print("4. There are actual courses for semesters 3 and 5 in your Excel file")
         import traceback

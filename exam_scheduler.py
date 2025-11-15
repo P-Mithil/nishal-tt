@@ -11,6 +11,8 @@ class ExamScheduler:
     def __init__(self, data_frames, schedule_generator):
         self.dfs = data_frames
         self.schedule_gen = schedule_generator
+        self.exam_classrooms = self._get_exam_classrooms()
+        self.faculty_list = self._get_faculty_list()
     
     def get_all_pre_mid_courses(self):
         """Get all Pre-Mid courses from all target semesters."""
@@ -113,6 +115,139 @@ class ExamScheduler:
             all_post_mid_df = all_post_mid_df.drop_duplicates(subset=['Course Code'], keep='first').reset_index(drop=True)
         
         return all_post_mid_df
+    
+    def _get_exam_classrooms(self):
+        """Get list of exam classrooms (non-lab, non-auditorium normal classrooms)."""
+        exam_rooms = []
+        if not self.schedule_gen or not self.schedule_gen.classrooms:
+            return exam_rooms
+        
+        # Get classroom data to check room types
+        classroom_df = self.dfs.get('classroom')
+        if classroom_df is None or classroom_df.empty:
+            # Fallback: use nonlab_rooms from schedule_gen
+            exam_rooms = [room[0] for room in self.schedule_gen.nonlab_rooms if room[0] != 'C004']
+            return exam_rooms
+        
+        # Find room number and type columns
+        room_col = None
+        type_col = None
+        for col in classroom_df.columns:
+            col_lower = str(col).lower()
+            if room_col is None and any(k in col_lower for k in ['room', 'number', 'name']):
+                room_col = col
+            if type_col is None and any(k in col_lower for k in ['type', 'category']):
+                type_col = col
+        
+        if room_col is None:
+            room_col = classroom_df.columns[0]
+        
+        # Filter for normal classrooms (not lab, not auditorium)
+        for _, row in classroom_df.iterrows():
+            room_name = str(row.get(room_col, '')).strip()
+            if not room_name:
+                continue
+            
+            room_type = ''
+            if type_col:
+                room_type = str(row.get(type_col, '')).strip().lower()
+            
+            # Exclude labs and auditoriums
+            if 'lab' in room_type or 'auditorium' in room_type:
+                continue
+            if 'lab' in room_name.lower() or room_name.upper() == 'C004':
+                continue
+            
+            # Include normal classrooms
+            if 'classroom' in room_type or room_name.startswith('C'):
+                exam_rooms.append(room_name)
+        
+        # Remove duplicates and sort
+        exam_rooms = sorted(list(set(exam_rooms)))
+        return exam_rooms
+    
+    def _get_faculty_list(self):
+        """Get list of faculty names from faculty_availability.xlsx."""
+        faculty_list = []
+        faculty_df = self.dfs.get('facultyavailability')
+        if faculty_df is None or faculty_df.empty:
+            # Try alternative key names
+            for key in self.dfs.keys():
+                if 'faculty' in key.lower():
+                    faculty_df = self.dfs[key]
+                    break
+        
+        if faculty_df is None or faculty_df.empty:
+            print("WARNING: No faculty availability data found")
+            return faculty_list
+        
+        # Find faculty name column
+        faculty_col = None
+        for col in faculty_df.columns:
+            col_lower = str(col).lower()
+            if 'faculty' in col_lower or 'name' in col_lower or 'instructor' in col_lower:
+                faculty_col = col
+                break
+        
+        if faculty_col is None:
+            faculty_col = faculty_df.columns[0]
+        
+        # Extract unique faculty names
+        faculty_list = faculty_df[faculty_col].dropna().unique().tolist()
+        faculty_list = [str(f).strip() for f in faculty_list if str(f).strip()]
+        faculty_list = sorted(list(set(faculty_list)))
+        
+        print(f"Loaded {len(faculty_list)} faculty members for invigilation")
+        return faculty_list
+    
+    def _generate_invigilation_data(self, exam_days, num_classrooms_per_session=10):
+        """Generate invigilation assignments for exam days.
+        Returns DataFrame with columns: Day, Session, Classroom, Invigilator 1, Invigilator 2"""
+        if not self.exam_classrooms:
+            print("WARNING: No exam classrooms available for invigilation")
+            return pd.DataFrame()
+        
+        if not self.faculty_list:
+            print("WARNING: No faculty available for invigilation")
+            return pd.DataFrame()
+        
+        invigilation_data = []
+        sessions = ['FN', 'AN']
+        
+        for day in exam_days:
+            for session in sessions:
+                # Randomly select classrooms for this day/session
+                # Use a subset of available classrooms (not all may be needed)
+                num_rooms = min(num_classrooms_per_session, len(self.exam_classrooms))
+                selected_rooms = random.sample(self.exam_classrooms, num_rooms)
+                
+                # Assign 2 invigilators per classroom
+                available_faculty = self.faculty_list.copy()
+                random.shuffle(available_faculty)
+                
+                faculty_idx = 0
+                for room in selected_rooms:
+                    # Get 2 different invigilators
+                    invigilator1 = available_faculty[faculty_idx % len(available_faculty)]
+                    faculty_idx += 1
+                    invigilator2 = available_faculty[faculty_idx % len(available_faculty)]
+                    faculty_idx += 1
+                    
+                    # Ensure different invigilators
+                    if invigilator1 == invigilator2 and len(available_faculty) > 1:
+                        invigilator2 = available_faculty[(faculty_idx) % len(available_faculty)]
+                        faculty_idx += 1
+                    
+                    invigilation_data.append({
+                        'Day': day,
+                        'Session': session,
+                        'Classroom': room,
+                        'Invigilator 1': invigilator1,
+                        'Invigilator 2': invigilator2
+                    })
+        
+        invigilation_df = pd.DataFrame(invigilation_data)
+        return invigilation_df
     
     def schedule_exams(self, courses_df, num_days=7):
         """Schedule exams across specified number of days.
@@ -539,10 +674,37 @@ class ExamScheduler:
                         print("  Applied formatting to worksheets")
                     except Exception as e:
                         print(f"  WARNING: Could not format worksheets: {e}")
+                    
+                    # Create Invigilation Data sheet
+                    invigilation_df = pd.DataFrame()
+                    try:
+                        print("\nGenerating Invigilation Data...")
+                        invigilation_df = self._generate_invigilation_data(exam_days, num_classrooms_per_session=15)
+                        if not invigilation_df.empty:
+                            invigilation_df.to_excel(w, sheet_name='Invigilation Data', index=False)
+                            print(f"  Created Invigilation Data sheet with {len(invigilation_df)} assignments")
+                            print(f"    - {len(self.exam_classrooms)} exam classrooms available")
+                            print(f"    - {len(self.faculty_list)} faculty available")
+                            
+                            # Format invigilation sheet
+                            try:
+                                ws_invig = w.sheets['Invigilation Data']
+                                self._format_worksheet(ws_invig, has_index=False, start_row=1)
+                                print("  Applied formatting to Invigilation Data sheet")
+                            except Exception as e:
+                                print(f"  WARNING: Could not format Invigilation Data sheet: {e}")
+                        else:
+                            print("  WARNING: Could not generate invigilation data")
+                    except Exception as e:
+                        print(f"  WARNING: Could not create Invigilation Data sheet: {e}")
+                        import traceback
+                        traceback.print_exc()
                 
                 print(f"\nSUCCESS: Created {filename}")
                 print(f"  - Mid-Semester sheet: {len(pre_mid_courses)} courses distributed")
                 print(f"  - End-Semester sheet: {len(post_mid_courses)} courses distributed")
+                if not invigilation_df.empty:
+                    print(f"  - Invigilation Data sheet: {len(invigilation_df)} assignments")
                 print(f"  - File saved in: {FileManager.OUTPUT_DIR}")
                 
                 return True

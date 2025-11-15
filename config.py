@@ -1,8 +1,12 @@
 """Configuration settings for the timetable generator."""
+import os
 
-# Directory paths
-INPUT_DIR = 'C:/Users/Mithil/Desktop/nishaltt/sdtt_inputs'
-OUTPUT_DIR = 'C:/Users/Mithil/Desktop/nishaltt/output'
+# Get the directory where this config file is located
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Directory paths (relative to the script location)
+INPUT_DIR = os.path.join(BASE_DIR, 'sdtt_inputs')
+OUTPUT_DIR = os.path.join(BASE_DIR, 'output')
 
 # Required Excel input files
 REQUIRED_FILES = [

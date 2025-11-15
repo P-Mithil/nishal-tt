@@ -66,11 +66,23 @@ class ExcelLoader:
         """Loads all Excel files from the input directory into a dictionary of DataFrames."""
         data_frames = {}
         
+        # Load required files
         for filename in REQUIRED_FILES:
             filepath = os.path.join(INPUT_DIR, filename)
             try:
                 if os.path.exists(filepath):
                     df = pd.read_excel(filepath)
+                    # Normalize column names: strip whitespace and handle common variations
+                    df.columns = df.columns.str.strip()
+                    # Handle specific column name variations
+                    column_mapping = {}
+                    for col in df.columns:
+                        col_upper = str(col).upper()
+                        # Normalize "COMBINED CLASS " (with trailing space) to "Combined Class"
+                        if 'COMBINED' in col_upper and 'CLASS' in col_upper:
+                            column_mapping[col] = 'Combined Class'
+                    if column_mapping:
+                        df = df.rename(columns=column_mapping)
                     key = filename.replace('_data.xlsx', '').replace('.xlsx', '')
                     data_frames[key] = df
                     print(f"SUCCESS: Loaded {filename} ({len(df)} records)")
@@ -88,6 +100,15 @@ class ExcelLoader:
                                 # Load all additional sheets
                                 if sheet_name.lower() not in ['course data', 'sheet1'] and sheet_name.strip():
                                     sheet_df = pd.read_excel(filepath, sheet_name=sheet_name)
+                                    # Normalize column names for additional sheets too
+                                    sheet_df.columns = sheet_df.columns.str.strip()
+                                    column_mapping = {}
+                                    for col in sheet_df.columns:
+                                        col_upper = str(col).upper()
+                                        if 'COMBINED' in col_upper and 'CLASS' in col_upper:
+                                            column_mapping[col] = 'Combined Class'
+                                    if column_mapping:
+                                        sheet_df = sheet_df.rename(columns=column_mapping)
                                     # Store with a key based on sheet name
                                     sheet_key = f"course_{sheet_name.strip().lower().replace(' ', '_')}"
                                     data_frames[sheet_key] = sheet_df
@@ -101,6 +122,23 @@ class ExcelLoader:
                 print(f"ERROR: Could not read {filename}")
                 print(f"Error details: {e}")
                 return None
+        
+        # Load additional optional files (faculty_availability.xlsx)
+        optional_files = ['faculty_availability.xlsx']
+        for filename in optional_files:
+            filepath = os.path.join(INPUT_DIR, filename)
+            try:
+                if os.path.exists(filepath):
+                    df = pd.read_excel(filepath)
+                    # Normalize column names
+                    df.columns = df.columns.str.strip()
+                    key = filename.replace('_data.xlsx', '').replace('.xlsx', '').replace('_', '')
+                    data_frames[key] = df
+                    print(f"SUCCESS: Loaded {filename} ({len(df)} records)")
+                else:
+                    print(f"INFO: Optional file not found: {filename} (will continue without it)")
+            except Exception as e:
+                print(f"INFO: Could not load optional file {filename}: {e}")
         
         return data_frames
     
